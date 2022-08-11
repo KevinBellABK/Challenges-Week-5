@@ -2,9 +2,11 @@
 #include <string>
 #include <iostream>
 #include <thread>
+#include <mutex>
 
 using namespace std;
 
+mutex Mutex;
 ENetHost* NetHost = nullptr;
 ENetPeer* Peer = nullptr;
 bool IsServer = false;
@@ -12,7 +14,11 @@ thread* PacketThread = nullptr;
 thread* UserPacketSender = nullptr;
 bool gameStart = false;
 int randNum = 0;
+int currGuess = INT_MIN;
+bool waitingForGuessCheck = false;
 bool guessFound = false;
+bool ngPrinted = false;
+bool isFirstRun = true;
 
 void BroadcastBool(bool newBool, string boolName);
 
@@ -205,6 +211,23 @@ void SendAMessage(string message, ENetPeer* peer)
     delete messageToSend;
 }
 
+void clearLine()
+{
+    cout << "\r                \r";
+    ngPrinted = false;
+}
+
+void printNewGuess()
+{
+    lock_guard<mutex> Guard(Mutex);
+    if (!ngPrinted)
+    {
+        cout << (isFirstRun ? "New Guess: " : "\nNew Guess: ");
+        isFirstRun = false;
+        ngPrinted = true;
+    }
+}
+
 void HandleReceivePacket(const ENetEvent& event)
 {
     GamePacket* RecGamePacket = (GamePacket*)(event.packet->data);
@@ -236,10 +259,9 @@ void HandleReceivePacket(const ENetEvent& event)
             case PHT_Message:
             {
                 MessagePacket* newMessage = (MessagePacket*)(RecGamePacket);
-                cout << "\r           \r"
-                << newMessage->m_message <<
-                    "\nNew Guess: ";
-                
+                clearLine();
+                cout << newMessage->m_message;
+                printNewGuess();
                 break;
             }
             case PHT_Bool:
@@ -253,12 +275,18 @@ void HandleReceivePacket(const ENetEvent& event)
             }
             case PHT_Result:
                 ResultPacket* newResult = (ResultPacket*)(RecGamePacket);
-                cout << "\r           \r" << newResult->m_guess << newResult->m_result << endl;
-                if(!guessFound)
-                    cout << "\nNew Guess: ";
+                clearLine();
+                cout << newResult->m_guess << newResult->m_result;
+                if (!guessFound)
+                {
+                    if (currGuess == newResult->m_guess)
+                    {
+                        waitingForGuessCheck = false;
+                        currGuess = INT_MIN;
+                    }
+                    printNewGuess();
+                }
             }
-            
-
         }
     }
     else
@@ -327,9 +355,9 @@ void ClientProcessPackets()
             switch (event.type)
             {
             case  ENET_EVENT_TYPE_CONNECT:
-                cout << "\r           \r"
-                << "Connection succeeded " <<
-                    "\nNew Guess: ";
+                clearLine();
+                cout << "Connection succeeded";
+                printNewGuess();
                 break;
             case ENET_EVENT_TYPE_RECEIVE:
                 HandleReceivePacket(event);
@@ -343,10 +371,16 @@ void ClientPacketSender()
 {
     while (!guessFound)
     {
-        cout << "New Guess: ";
-        int guess;
-        cin >> guess;
-        BroadcastGuess(guess);
+        if (!waitingForGuessCheck)
+        {
+            printNewGuess();
+            int guess;
+            cin >> guess;
+            currGuess = guess;
+            BroadcastGuess(guess);
+            ngPrinted = false;
+            waitingForGuessCheck = true;
+        }
     }
 }
 
@@ -395,7 +429,7 @@ int main(int argc, char** argv)
         }
         
         UserPacketSender = new thread(ClientPacketSender);
-        UserPacketSender->detach();
+        //UserPacketSender->detach();
         PacketThread = new thread(ClientProcessPackets);
 
         //handle possible connection failure
@@ -410,9 +444,10 @@ int main(int argc, char** argv)
     }
 
     if (PacketThread)
-    {
         PacketThread->join();
-    }
+    if (UserPacketSender)
+        UserPacketSender->join();
+
     delete PacketThread;
     delete UserPacketSender;
 
